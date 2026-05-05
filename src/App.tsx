@@ -118,6 +118,7 @@ type DocumentRecord = {
   source: 'Upload' | 'External Link'
   owner: string
   date: string
+  createdAt?: string
   size?: string
   url?: string
   storagePath?: string
@@ -149,6 +150,14 @@ type AuditEvent = {
   createdAt: string
 }
 
+type MatterUpdate = {
+  id: string
+  matterId: string
+  body: string
+  actorEmail: string
+  createdAt: string
+}
+
 type NavItem = {
   label: Exclude<View, 'Matter Detail'>
   icon: ComponentType<{ size?: number; strokeWidth?: number }>
@@ -172,6 +181,7 @@ type MatterStatusUpdate = {
   notes: string
   paymentAmount: number
   paymentDescription: string
+  documents: DraftDocument[]
 }
 
 type CostPaymentAllocation = {
@@ -266,6 +276,14 @@ type DocumentRowData = {
   created_at: string
 }
 
+type MatterUpdateRow = {
+  id: string
+  matter_id: string
+  body: string
+  created_by_email: string | null
+  created_at: string
+}
+
 type AuditEventRow = {
   id: string
   actor_email: string | null
@@ -288,6 +306,7 @@ type CloudData = {
   costs: CostRow[]
   costEntries: CostEntry[]
   documents: DocumentRecord[]
+  matterUpdates: MatterUpdate[]
   auditEvents: AuditEvent[]
 }
 
@@ -586,6 +605,23 @@ const initialActivity: ActivityRow[] = [
   },
 ]
 
+const initialMatterUpdates: MatterUpdate[] = [
+  {
+    id: 'upd-1',
+    matterId: 'mat-001',
+    body: 'Review update: Acme redlines reviewed; pending commercial approval before final signing.',
+    actorEmail: 'jane.doe@keltech.in',
+    createdAt: '2026-05-02T10:30:00+05:30',
+  },
+  {
+    id: 'upd-2',
+    matterId: 'mat-002',
+    body: 'Hearing attended: Arguments made. Next hearing listed for May 9, 2026.',
+    actorEmail: 'michael.chen@keltech.in',
+    createdAt: '2026-05-01T15:45:00+05:30',
+  },
+]
+
 function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [authEmail, setAuthEmail] = useState('legal@keltech.in')
@@ -604,6 +640,7 @@ function App() {
   const [costs, setCosts] = useState(initialCosts)
   const [costEntries, setCostEntries] = useState(initialCostEntries)
   const [documents, setDocuments] = useState(initialDocuments)
+  const [matterUpdates, setMatterUpdates] = useState(initialMatterUpdates)
   const [activity, setActivity] = useState(initialActivity)
   const [selectedMatterId, setSelectedMatterId] = useState('mat-001')
   const [matterModal, setMatterModal] = useState<{ mode: 'create' | 'edit'; matterId?: string } | null>(null)
@@ -681,6 +718,7 @@ function App() {
         setCosts(cloudData.costs)
         setCostEntries(cloudData.costEntries)
         setDocuments(cloudData.documents)
+        setMatterUpdates(cloudData.matterUpdates)
         setAuditEvents(cloudData.auditEvents)
         setActivity(activityFromAudits(cloudData.auditEvents))
         setSelectedMatterId(cloudData.matters[0]?.id ?? '')
@@ -702,6 +740,7 @@ function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'monthly_budgets' }, () => void syncCloudData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'cost_entries' }, () => void syncCloudData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'documents' }, () => void syncCloudData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'matter_updates' }, () => void syncCloudData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_events' }, () => void syncCloudData())
       .subscribe()
 
@@ -749,6 +788,7 @@ function App() {
   const matterDocuments = documents.filter((document) => document.matterId === selectedMatter.id)
   const matterCosts = costEntries.filter((entry) => entry.matterId === selectedMatter.id)
   const matterAudit = auditEvents.filter((event) => event.matterId === selectedMatter.id)
+  const selectedMatterUpdates = matterUpdates.filter((update) => update.matterId === selectedMatter.id)
 
   function changeView(view: View) {
     setActiveView(view)
@@ -807,6 +847,26 @@ function App() {
       },
       ...rows,
     ])
+  }
+
+  async function recordMatterUpdate(matterId: string, body: string) {
+    if (!body.trim()) return
+    const entry: MatterUpdate = {
+      id: crypto.randomUUID(),
+      matterId,
+      body: body.trim(),
+      actorEmail: currentUser.email,
+      createdAt: new Date().toISOString(),
+    }
+    if (isCloudMode && supabase) {
+      const { error } = await supabase.from('matter_updates').insert({
+        matter_id: matterId,
+        body: entry.body,
+        created_by_email: currentUser.email,
+      })
+      if (error) throw error
+    }
+    setMatterUpdates((rows) => [entry, ...rows])
   }
 
   async function handleAuth(event: FormEvent<HTMLFormElement>) {
@@ -1092,6 +1152,8 @@ function App() {
         await updateCloudMatterStatus(updatedMatter)
         await upsertCloudLegalDate(updatedMatter)
         await updateCloudCostPayments(paymentAllocations)
+        await addCloudDocuments(matter.id, update.documents)
+        await recordMatterUpdate(matter.id, matterUpdateBody(matter, update, autoStatus, paymentAllocations))
       } catch (error) {
         setDataError(error instanceof Error ? error.message : 'Unable to update matter status in Supabase.')
         return
@@ -1102,6 +1164,14 @@ function App() {
     if (update.paymentAmount > 0) {
       setCostEntries(updatedCostEntries)
       setCosts((rows) => rebuildCostRowsFromEntries(rows, updatedCostEntries))
+    }
+    if (!isCloudMode) {
+      const newDocuments = documentsFromDrafts(update.documents, matter.id, currentUser.name)
+      if (newDocuments.length) {
+        setDocuments((rows) => [...newDocuments, ...rows])
+        newDocuments.forEach((document) => appendAudit('DOCUMENT_ATTACHED_TO_UPDATE', 'document', document.id, matter.id, undefined, document))
+      }
+      await recordMatterUpdate(matter.id, matterUpdateBody(matter, update, autoStatus, paymentAllocations))
     }
     appendAudit('MATTER_UPDATE_RECORDED', 'matter', matter.id, matter.id, {
       status: matter.status,
@@ -1116,6 +1186,7 @@ function App() {
       notes: update.notes,
       paymentAmount: update.paymentAmount,
       paymentAppliedToCostIds: paymentAllocations.map((allocation) => allocation.id),
+      documents: update.documents.map((document) => document.name),
     })
     pushActivity(`recorded ${update.updateType.toLowerCase()} update for ${matter.title}`)
     setStatusModalMatterId(null)
@@ -1228,6 +1299,7 @@ function App() {
     matterDocuments,
     matterCosts,
     matterAudit,
+    selectedMatterUpdates,
     filter,
     setFilter,
     search,
@@ -1508,6 +1580,7 @@ type SharedPageProps = {
   matterDocuments: DocumentRecord[]
   matterCosts: CostEntry[]
   matterAudit: AuditEvent[]
+  selectedMatterUpdates: MatterUpdate[]
   filter: string
   setFilter: (filter: string) => void
   search: string
@@ -1783,6 +1856,7 @@ function MatterDetailPage({
   matterDocuments,
   matterCosts,
   matterAudit,
+  selectedMatterUpdates,
   legalDates,
   documents,
   setActiveView,
@@ -1870,16 +1944,106 @@ function MatterDetailPage({
         </section>
 
         <section className="panel detail-wide">
-          <PanelTitle title="Matter Audit Trail" subtitle="Filtered audit activity for this matter." />
-          <div className="audit-list">
-            {matterAudit.map((event) => (
-              <AuditRow key={event.id} event={event} onSelect={() => undefined} />
-            ))}
-          </div>
+          <MatterHistoryPanel
+            matter={selectedMatter}
+            updates={selectedMatterUpdates}
+            documents={matterDocuments}
+            costs={matterCosts}
+            auditEvents={matterAudit}
+            onAccess={handleDocumentAccess}
+          />
         </section>
       </div>
       <p className="quiet-note">This matter has {documents.filter((document) => document.matterId === selectedMatter.id).length} documents attached.</p>
     </section>
+  )
+}
+
+type MatterHistoryItem = {
+  id: string
+  kind: 'Update' | 'Document' | 'Payment' | 'Date' | 'Matter' | 'Audit'
+  title: string
+  summary: string
+  actor: string
+  createdAt: string
+  document?: DocumentRecord
+}
+
+function MatterHistoryPanel({
+  matter,
+  updates,
+  documents,
+  costs,
+  auditEvents,
+  onAccess,
+}: {
+  matter: Matter
+  updates: MatterUpdate[]
+  documents: DocumentRecord[]
+  costs: CostEntry[]
+  auditEvents: AuditEvent[]
+  onAccess: (document: DocumentRecord, mode: DocumentAccessMode) => void
+}) {
+  const totalNoted = costs.reduce((sum, entry) => sum + entry.amount, 0)
+  const totalPaid = costs.reduce((sum, entry) => sum + entry.paidAmount, 0)
+  const historyItems = buildMatterHistoryItems(updates, documents, auditEvents)
+
+  return (
+    <>
+      <PanelTitle
+        title="Matter History Ledger"
+        subtitle="Readable matter updates, document attachments, payments, and security-sensitive actions."
+      />
+      <div className="history-summary">
+        <Fact label="Updates" value={String(updates.length)} />
+        <Fact label="Documents" value={String(documents.length)} />
+        <Fact label="Outstanding" value={currency.format(Math.max(totalNoted - totalPaid, 0))} />
+        <Fact label="Current Status" value={matter.status} />
+      </div>
+      <div className="history-list">
+        {historyItems.length ? historyItems.map((item) => (
+          <article key={item.id} className="history-item">
+            <span className={`history-icon ${item.kind.toLowerCase()}`}>
+              {historyIcon(item.kind)}
+            </span>
+            <div>
+              <div className="history-heading">
+                <strong>{item.title}</strong>
+                <time>{formatDateTime(item.createdAt)}</time>
+              </div>
+              <p>{item.summary}</p>
+              <small>{item.actor}</small>
+              {item.document && (
+                <div className="history-document">
+                  <FileText size={16} />
+                  <span>
+                    <strong>{item.document.name}</strong>
+                    <small>{item.document.type} - {item.document.source}</small>
+                  </span>
+                  <span className="doc-actions">
+                    <button
+                      className="icon-button"
+                      type="button"
+                      title={item.document.source === 'External Link' ? 'Open link' : 'Preview document'}
+                      onClick={() => onAccess(item.document as DocumentRecord, 'preview')}
+                    >
+                      <Link2 size={15} />
+                    </button>
+                    {item.document.source === 'Upload' && (
+                      <button className="icon-button" type="button" title="Download document" onClick={() => onAccess(item.document as DocumentRecord, 'download')}>
+                        <Download size={15} />
+                      </button>
+                    )}
+                  </span>
+                </div>
+              )}
+            </div>
+          </article>
+        )) : (
+          <p className="quiet-note">No ledger entries yet. Status updates and document attachments will appear here.</p>
+        )}
+      </div>
+    </>
   )
 }
 
@@ -2740,6 +2904,7 @@ function MatterStatusModal({
   const [notes, setNotes] = useState('')
   const [paymentAmount, setPaymentAmount] = useState(0)
   const [paymentDescription, setPaymentDescription] = useState('Payment made')
+  const [documents, setDocuments] = useState<DraftDocument[]>([])
   const automaticStatus = status === 'Closed' ? 'Closed' : statusFromDate(nextDate)
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -2753,6 +2918,7 @@ function MatterStatusModal({
       notes,
       paymentAmount,
       paymentDescription,
+      documents,
     })
   }
 
@@ -2816,6 +2982,10 @@ function MatterStatusModal({
             Update notes
             <textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Arguments made, conclusions, order passed, directions, next steps..." />
           </label>
+          <div className="wide">
+            <span className="field-label">Attach documents to this update</span>
+            <DraftDocuments drafts={documents} onChange={setDocuments} />
+          </div>
         </div>
         <button className="primary-button full-width" type="submit">Save Status Update</button>
       </form>
@@ -3437,12 +3607,155 @@ function AuditRow({ event, onSelect }: { event: AuditEvent; onSelect: () => void
   )
 }
 
+function buildMatterHistoryItems(
+  updates: MatterUpdate[],
+  documents: DocumentRecord[],
+  auditEvents: AuditEvent[],
+): MatterHistoryItem[] {
+  const updateItems: MatterHistoryItem[] = updates.map((update) => ({
+    id: `update-${update.id}`,
+    kind: 'Update',
+    title: 'Matter update',
+    summary: update.body,
+    actor: update.actorEmail,
+    createdAt: update.createdAt,
+  }))
+  const documentItems: MatterHistoryItem[] = documents.map((document) => ({
+    id: `document-${document.id}`,
+    kind: 'Document',
+    title: document.source === 'External Link' ? 'External link attached' : 'Document attached',
+    summary: `${document.name} was linked to this matter.`,
+    actor: document.owner,
+    createdAt: document.createdAt ?? document.date,
+    document,
+  }))
+  const hiddenActions = new Set([
+    'MATTER_UPDATE_RECORDED',
+    'DOCUMENT_ATTACHED',
+    'DOCUMENT_ATTACHED_ON_CREATE',
+    'DOCUMENT_ATTACHED_TO_UPDATE',
+    'DOCUMENT_UPLOADED',
+    'DOCUMENTS_INSERT',
+  ])
+  const auditItems: MatterHistoryItem[] = auditEvents
+    .filter((event) => !hiddenActions.has(event.action.toUpperCase()))
+    .map((event) => ({
+      id: `audit-${event.id}`,
+      kind: historyKindFromAudit(event),
+      title: titleFromAudit(event),
+      summary: summarizeAuditEvent(event),
+      actor: event.actorEmail,
+      createdAt: event.createdAt,
+    }))
+
+  return [...updateItems, ...documentItems, ...auditItems].sort((a, b) => historyTime(b.createdAt) - historyTime(a.createdAt))
+}
+
+function historyKindFromAudit(event: AuditEvent): MatterHistoryItem['kind'] {
+  const action = event.action.toUpperCase()
+  const entityType = String(event.entityType)
+  if (entityType === 'document' || entityType === 'documents') return 'Document'
+  if (entityType === 'cost' || entityType === 'cost_entries' || action.includes('PAYMENT')) return 'Payment'
+  if (entityType === 'legal_date' || entityType === 'legal_dates' || action.includes('DATE') || action.includes('STATUS')) return 'Date'
+  if (entityType === 'matter' || entityType === 'matters') return 'Matter'
+  return 'Audit'
+}
+
+function titleFromAudit(event: AuditEvent) {
+  const action = event.action.toUpperCase()
+  if (action.includes('PREVIEW')) return 'Document preview requested'
+  if (action.includes('DOWNLOAD')) return 'Document download requested'
+  if (action.includes('PAYMENT') || action.includes('COST_ENTRIES_UPDATE')) return 'Payment updated'
+  if (action.includes('COST')) return 'Cost updated'
+  if (action.includes('STATUS') || action.includes('DATE') || action.includes('LEGAL_DATES')) return 'Date/status updated'
+  if (action.includes('COUNTERPARTY')) return 'Counterparty updated'
+  if (action.includes('LOCATION')) return 'Location updated'
+  if (action.includes('MATTER_CREATED') || action.includes('MATTERS_INSERT')) return 'Matter created'
+  if (action.includes('MATTER_UPDATED') || action.includes('MATTERS_UPDATE')) return 'Matter edited'
+  return event.action.toLowerCase().replace(/_/g, ' ')
+}
+
+function summarizeAuditEvent(event: AuditEvent) {
+  const action = event.action.toUpperCase()
+  const before = event.before ?? {}
+  const after = event.after ?? {}
+  const afterStatus = stringValue(after.status)
+  const beforeStatus = stringValue(before.status)
+  const afterPriority = stringValue(after.priority)
+  const nextDate = stringValue(after.nextDate) || stringValue(after.next_date)
+  const nextDateLabel = stringValue(after.nextDateLabel) || stringValue(after.next_date_label)
+  const paidAmount = numberValue(after.paidAmount) || numberValue(after.paid_inr)
+  const paymentAmount = numberValue(after.paymentAmount)
+  const paymentStatus = stringValue(after.paymentStatus) || stringValue(after.payment_status)
+  const documentName = stringValue(after.documentName) || stringValue(after.name)
+  const accessType = stringValue(after.accessType)
+
+  if (action.includes('PAYMENT') || action.includes('COST_ENTRIES_UPDATE')) {
+    const amount = paymentAmount || paidAmount
+    return `${amount ? `${currency.format(amount)} payment recorded. ` : ''}${paymentStatus ? `Payment status is ${paymentStatus}.` : 'Payment details were updated.'}`
+  }
+  if (action.includes('PREVIEW') || action.includes('DOWNLOAD')) {
+    return `${documentName || 'A document'} access was requested${accessType ? ` (${accessType})` : ''}.`
+  }
+  if (action.includes('STATUS') || action.includes('DATE') || action.includes('LEGAL_DATES')) {
+    const statusText = afterStatus ? `Status ${beforeStatus ? `changed from ${beforeStatus} to ${afterStatus}` : `set to ${afterStatus}`}.` : ''
+    const dateText = nextDate ? ` Next ${nextDateLabel || 'date'} is ${formatShortDate(nextDate)}.` : ''
+    const priorityText = afterPriority ? ` Priority is ${afterPriority}.` : ''
+    return `${statusText}${dateText}${priorityText}`.trim() || 'Matter date/status was updated.'
+  }
+  if (action.includes('COUNTERPARTY')) {
+    return `Counterparty changed from ${stringValue(before.counterparty) || 'not set'} to ${stringValue(after.counterparty) || 'not set'}.`
+  }
+  if (action.includes('LOCATION')) {
+    return `Location changed from ${stringValue(before.location) || 'not set'} to ${stringValue(after.location) || 'not set'}.`
+  }
+  if (action.includes('MATTER_CREATED') || action.includes('MATTERS_INSERT')) return 'Matter record was opened in the tracker.'
+  if (action.includes('MATTER_UPDATED') || action.includes('MATTERS_UPDATE')) return 'Matter details were edited.'
+  if (action.includes('COST')) return 'A matter-linked cost entry was changed.'
+  return `${event.entityType} activity recorded.`
+}
+
+function historyIcon(kind: MatterHistoryItem['kind']) {
+  if (kind === 'Document') return <FileText size={17} />
+  if (kind === 'Payment') return <IndianRupee size={17} />
+  if (kind === 'Date') return <CalendarDays size={17} />
+  if (kind === 'Matter') return <FolderOpen size={17} />
+  if (kind === 'Audit') return <ShieldCheck size={17} />
+  return <Activity size={17} />
+}
+
+function historyTime(value: string) {
+  if (value === 'Just now') return Date.now()
+  const time = Date.parse(value)
+  return Number.isNaN(time) ? 0 : time
+}
+
 function statusClass(status: Status) {
   return status.toLowerCase().replace(/\s+/g, '-')
 }
 
 function formatShortDate(value: string) {
   return new Date(value).toLocaleDateString('en-IN', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function formatDateTime(value: string) {
+  if (value === 'Just now') return value
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : ''
+}
+
+function numberValue(value: unknown) {
+  if (typeof value === 'number') return value
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    return Number.isNaN(parsed) ? 0 : parsed
+  }
+  return 0
 }
 
 function initials(name: string) {
@@ -3685,9 +3998,32 @@ function documentsFromDrafts(drafts: DraftDocument[], matterId: string, owner: s
     source: draft.source,
     owner: toTitleCase(owner),
     date: 'Just now',
+    createdAt: new Date().toISOString(),
     size: draft.size,
     url: draft.url,
   }))
+}
+
+function matterUpdateBody(
+  matter: Matter,
+  update: MatterStatusUpdate,
+  autoStatus: Status,
+  paymentAllocations: CostPaymentAllocation[],
+) {
+  const parts = [
+    `${update.updateType}: ${matter.title}`,
+    `Status ${autoStatus}`,
+    `priority ${update.priority}`,
+    `next ${update.nextDateLabel || 'date'} on ${formatShortDate(update.nextDate)}`,
+  ]
+  if (update.notes.trim()) parts.push(`Notes: ${update.notes.trim()}`)
+  if (update.paymentAmount > 0) {
+    parts.push(`${currency.format(update.paymentAmount)} payment recorded${paymentAllocations.length ? ` against ${paymentAllocations.length} cost entr${paymentAllocations.length === 1 ? 'y' : 'ies'}` : ''}`)
+  }
+  if (update.documents.length) {
+    parts.push(`Documents attached: ${update.documents.map((document) => document.name).join(', ')}`)
+  }
+  return parts.join('. ')
 }
 
 function openDocumentPreview(document: DocumentRecord) {
@@ -3756,6 +4092,7 @@ async function loadCloudData(): Promise<CloudData> {
     budgetResult,
     costEntryResult,
     documentResult,
+    matterUpdateResult,
     auditResult,
   ] = await Promise.all([
     client.from('matter_categories').select('id,name,color').order('name'),
@@ -3765,10 +4102,11 @@ async function loadCloudData(): Promise<CloudData> {
     client.from('monthly_budgets').select('*'),
     client.from('cost_entries').select('*').order('cost_month', { ascending: false }),
     client.from('documents').select('*').order('created_at', { ascending: false }),
+    client.from('matter_updates').select('*').order('created_at', { ascending: false }),
     client.from('audit_events').select('*').order('created_at', { ascending: false }).limit(200),
   ])
 
-  const results = [categoryResult, matterResult, legalDateResult, taskResult, budgetResult, costEntryResult, documentResult, auditResult]
+  const results = [categoryResult, matterResult, legalDateResult, taskResult, budgetResult, costEntryResult, documentResult, matterUpdateResult, auditResult]
   const failed = results.find((result) => result.error)
   if (failed?.error) throw failed.error
 
@@ -3788,6 +4126,7 @@ async function loadCloudData(): Promise<CloudData> {
     costs: buildCostRows(categories, (budgetResult.data ?? []) as BudgetRow[], costEntries),
     costEntries,
     documents: ((documentResult.data ?? []) as DocumentRowData[]).map(mapDocumentRow),
+    matterUpdates: ((matterUpdateResult.data ?? []) as MatterUpdateRow[]).map(mapMatterUpdateRow),
     auditEvents: ((auditResult.data ?? []) as AuditEventRow[]).map((row) => mapAuditEventRow(row, matterTitleMap)),
   }
 }
@@ -3863,8 +4202,19 @@ function mapDocumentRow(row: DocumentRowData): DocumentRecord {
     source: row.source,
     owner: row.uploaded_by_name ?? 'Unknown',
     date: new Date(row.created_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }),
+    createdAt: row.created_at,
     url: row.external_url ?? undefined,
     storagePath: row.storage_path ?? undefined,
+  }
+}
+
+function mapMatterUpdateRow(row: MatterUpdateRow): MatterUpdate {
+  return {
+    id: row.id,
+    matterId: row.matter_id,
+    body: row.body,
+    actorEmail: row.created_by_email ?? 'unknown@keltech.in',
+    createdAt: row.created_at,
   }
 }
 

@@ -1105,6 +1105,13 @@ td small {
   padding: 0 18px 18px;
 }
 
+.history-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 18px 16px;
+}
+
 .fact {
   min-height: 74px;
   padding: 14px;
@@ -1157,6 +1164,98 @@ td small {
 
 .simple-list article:first-child {
   border-top: 0;
+}
+
+.history-list {
+  display: grid;
+  padding: 0 18px 18px;
+}
+
+.history-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+
+.history-item:first-child {
+  border-top: 0;
+}
+
+.history-icon {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 50%;
+  color: #0a4a5b;
+  background: #e9f6f8;
+}
+
+.history-icon.document {
+  color: #0b65c2;
+  background: #eaf3ff;
+}
+
+.history-icon.payment {
+  color: #087342;
+  background: #e7f7ef;
+}
+
+.history-icon.date {
+  color: #9a6500;
+  background: #fff4db;
+}
+
+.history-icon.matter,
+.history-icon.audit {
+  color: #5949a7;
+  background: #f0edff;
+}
+
+.history-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-heading strong,
+.history-item p,
+.history-item small {
+  display: block;
+}
+
+.history-heading time,
+.history-item small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-item p {
+  margin: 5px 0;
+  color: #21364c;
+  line-height: 1.5;
+}
+
+.history-document {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #d7e0e8;
+  border-radius: 7px;
+  background: #f8fbfd;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 7px;
+  color: #2a4058;
+  font-weight: 800;
 }
 
 .simple-list strong,
@@ -1531,6 +1630,14 @@ td small {
   .calendar-grid,
   .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .history-summary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .history-heading {
+    display: grid;
   }
 
   .calendar-weekdays {

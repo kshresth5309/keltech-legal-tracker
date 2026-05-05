@@ -399,8 +399,7 @@ begin
     'tasks',
     'monthly_budgets',
     'cost_entries',
-    'documents',
-    'matter_updates'
+    'documents'
   ]
   loop
     execute format('drop policy if exists authenticated_full_access on public.%I', table_name);
@@ -410,6 +409,21 @@ begin
     );
   end loop;
 end $$;
+
+drop policy if exists authenticated_full_access on public.matter_updates;
+drop policy if exists authenticated_read_matter_updates on public.matter_updates;
+create policy authenticated_read_matter_updates
+on public.matter_updates
+for select
+to authenticated
+using (true);
+
+drop policy if exists authenticated_insert_matter_updates on public.matter_updates;
+create policy authenticated_insert_matter_updates
+on public.matter_updates
+for insert
+to authenticated
+with check ((select auth.uid()) is not null);
 
 drop policy if exists authenticated_read_audit on public.audit_events;
 create policy authenticated_read_audit
@@ -467,6 +481,12 @@ end $$;
 do $$
 begin
   alter publication supabase_realtime add table public.documents;
+exception when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table public.matter_updates;
 exception when duplicate_object then null;
 end $$;
 
