@@ -174,6 +174,13 @@ type MatterStatusUpdate = {
   paymentDescription: string
 }
 
+type CostPaymentAllocation = {
+  id: string
+  paidAmount: number
+  paidOn: string
+  paymentStatus: CostEntry['paymentStatus']
+}
+
 type DraftDocument = {
   name: string
   type: DocumentType
@@ -1055,35 +1062,36 @@ function App() {
   }
 
   async function applyMatterStatusUpdate(matter: Matter, update: MatterStatusUpdate) {
+    const autoStatus = update.status === 'Closed' ? 'Closed' : statusFromDate(update.nextDate)
     const updatedMatter = {
       ...matter,
-      status: update.status,
+      status: autoStatus,
       priority: update.priority,
       nextDate: update.nextDate,
       nextDateLabel: update.nextDateLabel,
       lastUpdate: 'Just now',
     }
+    let updatedCostEntries = costEntries
+    let paymentAllocations: CostPaymentAllocation[] = []
+
+    if (update.paymentAmount > 0) {
+      const allocation = allocatePaymentToMatterCosts(costEntries, matter.id, update.paymentAmount, new Date().toISOString().slice(0, 10))
+      if (!allocation.allocations.length) {
+        setDataError(`No outstanding cost is recorded for ${matter.title}. Add the due cost first, then record payment against it.`)
+        return
+      }
+      updatedCostEntries = allocation.entries
+      paymentAllocations = allocation.allocations
+      if (allocation.unapplied > 0) {
+        setDataError(`${currency.format(allocation.unapplied)} was not applied because this matter has no more outstanding costs.`)
+      }
+    }
+
     if (isCloudMode && supabase) {
       try {
         await updateCloudMatterStatus(updatedMatter)
         await upsertCloudLegalDate(updatedMatter)
-        if (update.paymentAmount > 0) {
-          const categoryId = await ensureCloudCategory(matter.category)
-          await insertCloudCostEntry(
-            {
-              matterId: matter.id,
-              category: matter.category,
-              amount: update.paymentAmount,
-              paidAmount: update.paymentAmount,
-              paidOn: new Date().toISOString().slice(0, 10),
-              paymentStatus: 'Paid',
-              vendor: matter.owner,
-              month: new Date().toISOString().slice(0, 7),
-              description: update.paymentDescription || `${update.updateType} payment`,
-            },
-            categoryId,
-          )
-        }
+        await updateCloudCostPayments(paymentAllocations)
       } catch (error) {
         setDataError(error instanceof Error ? error.message : 'Unable to update matter status in Supabase.')
         return
@@ -1091,34 +1099,23 @@ function App() {
     }
     setMatters((rows) => rows.map((row) => (row.id === matter.id ? updatedMatter : row)))
     setLegalDates((rows) => upsertDate(rows, updatedMatter))
-    if (!isCloudMode && update.paymentAmount > 0) {
-      const paymentEntry: CostEntry = {
-        id: crypto.randomUUID(),
-        matterId: matter.id,
-        category: matter.category,
-        amount: update.paymentAmount,
-        paidAmount: update.paymentAmount,
-        paidOn: new Date().toISOString().slice(0, 10),
-        paymentStatus: 'Paid',
-        vendor: matter.owner,
-        month: new Date().toISOString().slice(0, 7),
-        description: update.paymentDescription || `${update.updateType} payment`,
-      }
-      setCostEntries((rows) => [paymentEntry, ...rows])
-      setCosts((rows) => updateCostRows(rows, paymentEntry.category, paymentEntry.amount, paymentEntry.paidAmount))
+    if (update.paymentAmount > 0) {
+      setCostEntries(updatedCostEntries)
+      setCosts((rows) => rebuildCostRowsFromEntries(rows, updatedCostEntries))
     }
     appendAudit('MATTER_UPDATE_RECORDED', 'matter', matter.id, matter.id, {
       status: matter.status,
       priority: matter.priority,
       nextDate: matter.nextDate,
     }, {
-      status: update.status,
+      status: autoStatus,
       priority: update.priority,
       nextDate: update.nextDate,
       nextDateLabel: update.nextDateLabel,
       updateType: update.updateType,
       notes: update.notes,
       paymentAmount: update.paymentAmount,
+      paymentAppliedToCostIds: paymentAllocations.map((allocation) => allocation.id),
     })
     pushActivity(`recorded ${update.updateType.toLowerCase()} update for ${matter.title}`)
     setStatusModalMatterId(null)
@@ -1890,13 +1887,14 @@ function CalendarPage({
   matters,
   legalDates,
   onOpenMatter,
-  onUpdateStatus,
+  onUpdateStatus: _onUpdateStatus,
 }: {
   matters: Matter[]
   legalDates: LegalDate[]
   onOpenMatter: (matterId: string) => void
   onUpdateStatus: (date: LegalDate, status: Status) => void
 }) {
+  void _onUpdateStatus
   const [visibleMonth, setVisibleMonth] = useState(() => {
     const firstTrackedDate = legalDates.map((date) => date.date).sort()[0]
     return firstTrackedDate ? parseMonthKey(firstTrackedDate) : monthFromDate(new Date())
@@ -1947,7 +1945,7 @@ function CalendarPage({
                     {dayEvents.map((event) => (
                       <button
                         key={event.id}
-                        className={`calendar-chip ${statusClass(event.status)}`}
+                        className={`calendar-chip ${statusClass(event.status === 'Closed' ? 'Closed' : statusFromDate(event.date))}`}
                         type="button"
                         onClick={() => onOpenMatter(event.matterId)}
                       >
@@ -1966,8 +1964,9 @@ function CalendarPage({
           <div className="calendar-list">
             {(monthDates.length ? monthDates : allSortedDates).map((date) => {
             const matter = matters.find((item) => item.id === date.matterId)
+            const autoStatus = date.status === 'Closed' ? 'Closed' : statusFromDate(date.date)
             return (
-              <article className={`calendar-row ${statusClass(date.status)}`} key={date.id}>
+              <article className={`calendar-row ${statusClass(autoStatus)}`} key={date.id}>
                 <div className="date-box">
                   <span>{new Date(date.date).toLocaleString('en-IN', { month: 'short' })}</span>
                   <strong>{new Date(date.date).getDate()}</strong>
@@ -1977,11 +1976,7 @@ function CalendarPage({
                   <strong>{date.title}</strong>
                   <small>{date.type} - {matter?.counterparty ?? 'Unknown counterparty'}</small>
                 </span>
-                <select value={date.status} onChange={(event) => onUpdateStatus(date, event.target.value as Status)}>
-                  {['Open', 'Due Soon', 'On Track', 'Overdue', 'Closed'].map((status) => (
-                    <option key={status}>{status}</option>
-                  ))}
-                </select>
+                <span className={`status ${statusClass(autoStatus)}`}>Auto: {autoStatus}</span>
                 <button className="ghost-button" type="button" onClick={() => onOpenMatter(date.matterId)}>
                   Open Matter
                 </button>
@@ -2737,7 +2732,7 @@ function MatterStatusModal({
   onClose: () => void
   onSave: (matter: Matter, update: MatterStatusUpdate) => void
 }) {
-  const [status, setStatus] = useState<Status>(matter.status)
+  const [status, setStatus] = useState<Status>(matter.status === 'Closed' ? 'Closed' : statusFromDate(matter.nextDate))
   const [priority, setPriority] = useState<Matter['priority']>(matter.priority)
   const [nextDate, setNextDate] = useState(matter.nextDate)
   const [nextDateLabel, setNextDateLabel] = useState(matter.nextDateLabel)
@@ -2745,11 +2740,12 @@ function MatterStatusModal({
   const [notes, setNotes] = useState('')
   const [paymentAmount, setPaymentAmount] = useState(0)
   const [paymentDescription, setPaymentDescription] = useState('Payment made')
+  const automaticStatus = status === 'Closed' ? 'Closed' : statusFromDate(nextDate)
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     onSave(matter, {
-      status,
+      status: automaticStatus,
       priority,
       nextDate,
       nextDateLabel,
@@ -2782,8 +2778,10 @@ function MatterStatusModal({
           <label>
             Status
             <select value={status} onChange={(event) => setStatus(event.target.value as Status)}>
-              {['Open', 'Due Soon', 'On Track', 'Overdue', 'Closed'].map((item) => <option key={item}>{item}</option>)}
+              <option value={automaticStatus}>Auto: {automaticStatus}</option>
+              <option value="Closed">Closed</option>
             </select>
+            <small>Status auto-syncs to Calendar from the next date.</small>
           </label>
           <label>
             Priority
@@ -2793,7 +2791,14 @@ function MatterStatusModal({
           </label>
           <label>
             Next date
-            <input type="date" value={nextDate} onChange={(event) => setNextDate(event.target.value)} />
+            <input
+              type="date"
+              value={nextDate}
+              onChange={(event) => {
+                setNextDate(event.target.value)
+                if (status !== 'Closed') setStatus(statusFromDate(event.target.value))
+              }}
+            />
           </label>
           <label>
             Next date label
@@ -3581,8 +3586,39 @@ function getPaymentStatus(amount: number, paidAmount: number): CostEntry['paymen
   return 'Unpaid'
 }
 
+function allocatePaymentToMatterCosts(entries: CostEntry[], matterId: string, paymentAmount: number, paidOn: string) {
+  let remaining = paymentAmount
+  const allocations: CostPaymentAllocation[] = []
+  const eligible = entries
+    .filter((entry) => entry.matterId === matterId && entry.paymentStatus !== 'Paid' && entry.amount > entry.paidAmount)
+    .sort((a, b) => a.month.localeCompare(b.month) || a.id.localeCompare(b.id))
+  const nextEntries = entries.map((entry) => {
+    if (remaining <= 0) return entry
+    if (!eligible.some((eligibleEntry) => eligibleEntry.id === entry.id)) return entry
+    const outstanding = Math.max(entry.amount - entry.paidAmount, 0)
+    const applied = Math.min(outstanding, remaining)
+    remaining -= applied
+    const paidAmount = entry.paidAmount + applied
+    const paymentStatus = getPaymentStatus(entry.amount, paidAmount)
+    allocations.push({ id: entry.id, paidAmount, paidOn, paymentStatus })
+    return { ...entry, paidAmount, paidOn, paymentStatus }
+  })
+  return { entries: nextEntries, allocations, unapplied: remaining }
+}
+
 function paymentStatusClass(status: CostEntry['paymentStatus']) {
   return status.toLowerCase().replace(/\s+/g, '-')
+}
+
+function statusFromDate(dateValue: string): Status {
+  const today = new Date()
+  const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  const [year, month, day] = dateValue.split('-').map(Number)
+  const dueDate = new Date(year, month - 1, day)
+  const daysUntilDue = Math.floor((dueDate.getTime() - todayDate.getTime()) / 86_400_000)
+  if (daysUntilDue < 0) return 'Overdue'
+  if (daysUntilDue <= 7) return 'Due Soon'
+  return 'On Track'
 }
 
 function dateFromMatter(matter: Matter): LegalDate {
@@ -3990,6 +4026,22 @@ async function updateCloudMatterStatus(matter: Matter) {
     })
     .eq('id', matter.id)
   if (error) throw error
+}
+
+async function updateCloudCostPayments(allocations: CostPaymentAllocation[]) {
+  if (!allocations.length) return
+  const client = requireSupabase()
+  for (const allocation of allocations) {
+    const { error } = await client
+      .from('cost_entries')
+      .update({
+        paid_inr: allocation.paidAmount,
+        paid_on: allocation.paidOn,
+        payment_status: allocation.paymentStatus,
+      })
+      .eq('id', allocation.id)
+    if (error) throw error
+  }
 }
 
 function toTaskInsert(task: Task) {
