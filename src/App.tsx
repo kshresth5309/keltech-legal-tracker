@@ -343,7 +343,7 @@ const navItems: NavItem[] = [
   { label: 'Settings', icon: Settings },
 ]
 
-const adminFallbackEmails = new Set(['shresth@keltechgroup.com', 'upendra@keltechgroup.com'])
+const adminFallbackEmails = new Set(['shresth@keltechgroup.com', 'upendra@keltechgroup.com', 'nkumar@keltechgroup.com'])
 
 const initialMatters: Matter[] = [
   {

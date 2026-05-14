@@ -448,7 +448,7 @@ with check (
     role = 'user'
     or (
       role = 'admin'
-      and lower(email) in ('shresth@keltechgroup.com', 'upendra@keltechgroup.com')
+      and lower(email) in ('shresth@keltechgroup.com', 'upendra@keltechgroup.com', 'nkumar@keltechgroup.com')
       and lower(coalesce(auth.jwt() ->> 'email', '')) = lower(email)
     )
   )
