@@ -1184,6 +1184,29 @@ function App() {
     pushActivity(`updated payment for ${currency.format(entry.amount)} cost to ${paymentStatus}`)
   }
 
+  async function deleteCostEntry(entry: CostEntry) {
+    if (!isAdmin) {
+      setDataError('Only admins can delete cost entries.')
+      return
+    }
+    const confirmed = window.confirm(`Delete this ${currency.format(entry.amount)} cost entry? This removes the noted cost and payment record from reports.`)
+    if (!confirmed) return
+
+    appendAudit('COST_DELETE_REQUESTED', 'cost', entry.id, entry.matterId, entry, undefined)
+    if (isCloudMode && supabase) {
+      const { error } = await supabase.from('cost_entries').delete().eq('id', entry.id)
+      if (error) {
+        setDataError(error.message)
+        return
+      }
+    }
+
+    const nextEntries = costEntries.filter((row) => row.id !== entry.id)
+    setCostEntries(nextEntries)
+    setCosts((rows) => rebuildCostRowsFromEntries(rows, nextEntries))
+    pushActivity(`deleted ${currency.format(entry.amount)} cost entry`)
+  }
+
   async function applyMatterStatusUpdate(matter: Matter, update: MatterStatusUpdate) {
     const autoStatus = update.status === 'Closed' ? 'Closed' : statusFromDate(update.nextDate)
     const updatedMatter = {
@@ -1383,6 +1406,7 @@ function App() {
     addDocumentsToMatter,
     addCostEntry,
     updateCostPayment,
+    deleteCostEntry,
     addTask,
     updateTaskStatus,
     setMatterModal,
@@ -1535,7 +1559,14 @@ function App() {
           />
         )}
         {activeView === 'Costs' && (
-          <CostsPage matters={matters} costEntries={costEntries} onAddCost={addCostEntry} onUpdatePayment={updateCostPayment} />
+          <CostsPage
+            matters={matters}
+            costEntries={costEntries}
+            isAdmin={isAdmin}
+            onAddCost={addCostEntry}
+            onUpdatePayment={updateCostPayment}
+            onDeleteCost={deleteCostEntry}
+          />
         )}
         {activeView === 'Documents' && (
           <DocumentsPage
@@ -1666,6 +1697,7 @@ type SharedPageProps = {
   addDocumentsToMatter: (matterId: string, drafts: DraftDocument[]) => void
   addCostEntry: (entry: Omit<CostEntry, 'id'>) => void
   updateCostPayment: (entry: CostEntry, paidAmount: number, paidOn?: string) => void
+  deleteCostEntry: (entry: CostEntry) => void
   addTask: (task: Omit<Task, 'id' | 'createdAt'>) => void
   updateTaskStatus: (task: Task, status: Status) => void
   setMatterModal: (modal: { mode: 'create' | 'edit'; matterId?: string } | null) => void
@@ -2232,13 +2264,17 @@ function CalendarPage({
 function CostsPage({
   matters,
   costEntries,
+  isAdmin,
   onAddCost,
   onUpdatePayment,
+  onDeleteCost,
 }: {
   matters: Matter[]
   costEntries: CostEntry[]
+  isAdmin: boolean
   onAddCost: (entry: Omit<CostEntry, 'id'>) => void
   onUpdatePayment: (entry: CostEntry, paidAmount: number, paidOn?: string) => void
+  onDeleteCost: (entry: CostEntry) => void
 }) {
   const [matterId, setMatterId] = useState(matters[0]?.id ?? '')
   const [amount, setAmount] = useState(50000)
@@ -2313,7 +2349,7 @@ function CostsPage({
       </div>
       <section className="panel">
         <PanelTitle title="Cost Entries" subtitle={`${visibleEntries.length} entries for ${monthLabel}. Outstanding: ${currency.format(totalOutstanding)}.`} />
-        <CostEntriesTable entries={visibleEntries} matters={matters} onUpdatePayment={onUpdatePayment} />
+        <CostEntriesTable entries={visibleEntries} matters={matters} isAdmin={isAdmin} onUpdatePayment={onUpdatePayment} onDeleteCost={onDeleteCost} />
       </section>
     </section>
   )
@@ -2322,11 +2358,15 @@ function CostsPage({
 function CostEntriesTable({
   entries,
   matters,
+  isAdmin,
   onUpdatePayment,
+  onDeleteCost,
 }: {
   entries: CostEntry[]
   matters: Matter[]
+  isAdmin: boolean
   onUpdatePayment: (entry: CostEntry, paidAmount: number, paidOn?: string) => void
+  onDeleteCost: (entry: CostEntry) => void
 }) {
   if (!entries.length) return <p className="quiet-note">No cost entries for this month.</p>
 
@@ -2344,11 +2384,19 @@ function CostEntriesTable({
             <th>Vendor</th>
             <th>Description</th>
             <th>Payment</th>
+            {isAdmin && <th>Actions</th>}
           </tr>
         </thead>
         <tbody>
           {entries.map((entry) => (
-            <CostEntryRowView key={`${entry.id}-${entry.paidAmount}-${entry.paidOn ?? ''}`} entry={entry} matter={matters.find((matter) => matter.id === entry.matterId)} onUpdatePayment={onUpdatePayment} />
+            <CostEntryRowView
+              key={`${entry.id}-${entry.paidAmount}-${entry.paidOn ?? ''}`}
+              entry={entry}
+              matter={matters.find((matter) => matter.id === entry.matterId)}
+              isAdmin={isAdmin}
+              onUpdatePayment={onUpdatePayment}
+              onDeleteCost={onDeleteCost}
+            />
           ))}
         </tbody>
       </table>
@@ -2359,11 +2407,15 @@ function CostEntriesTable({
 function CostEntryRowView({
   entry,
   matter,
+  isAdmin,
   onUpdatePayment,
+  onDeleteCost,
 }: {
   entry: CostEntry
   matter?: Matter
+  isAdmin: boolean
   onUpdatePayment: (entry: CostEntry, paidAmount: number, paidOn?: string) => void
+  onDeleteCost: (entry: CostEntry) => void
 }) {
   const [paidAmount, setPaidAmount] = useState(entry.paidAmount)
   const [paidOn, setPaidOn] = useState(entry.paidOn ?? new Date().toISOString().slice(0, 10))
@@ -2388,6 +2440,14 @@ function CostEntryRowView({
           </button>
         </div>
       </td>
+      {isAdmin && (
+        <td>
+          <button className="danger-button compact-danger" type="button" onClick={() => onDeleteCost(entry)}>
+            <Trash2 size={15} />
+            Delete
+          </button>
+        </td>
+      )}
     </tr>
   )
 }

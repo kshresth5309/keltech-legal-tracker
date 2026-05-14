@@ -499,6 +499,43 @@ using (
   )
 );
 
+drop policy if exists authenticated_full_access on public.cost_entries;
+drop policy if exists authenticated_read_cost_entries on public.cost_entries;
+create policy authenticated_read_cost_entries
+on public.cost_entries
+for select
+to authenticated
+using (true);
+
+drop policy if exists authenticated_insert_cost_entries on public.cost_entries;
+create policy authenticated_insert_cost_entries
+on public.cost_entries
+for insert
+to authenticated
+with check ((select auth.uid()) is not null);
+
+drop policy if exists authenticated_update_cost_entries on public.cost_entries;
+create policy authenticated_update_cost_entries
+on public.cost_entries
+for update
+to authenticated
+using ((select auth.uid()) is not null)
+with check ((select auth.uid()) is not null);
+
+drop policy if exists admin_delete_cost_entries on public.cost_entries;
+create policy admin_delete_cost_entries
+on public.cost_entries
+for delete
+to authenticated
+using (
+  exists (
+    select 1
+    from public.profiles p
+    where p.id = (select auth.uid())
+      and p.role = 'admin'
+  )
+);
+
 drop trigger if exists prevent_profile_role_change on public.profiles;
 create trigger prevent_profile_role_change
 before update on public.profiles

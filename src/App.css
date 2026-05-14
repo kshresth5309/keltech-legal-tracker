@@ -1462,7 +1462,8 @@ td small {
 }
 
 .table-actions .ghost-button,
-.payment-controls .ghost-button {
+.payment-controls .ghost-button,
+.compact-danger {
   min-height: 34px;
   padding: 0 10px;
 }
