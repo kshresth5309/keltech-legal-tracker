@@ -27,6 +27,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  Trash2,
   Upload,
   Users,
 } from 'lucide-react'
@@ -49,6 +50,7 @@ type View =
 type Status = 'Open' | 'Due Soon' | 'Overdue' | 'On Track' | 'Closed'
 type EntityType = 'auth' | 'matter' | 'legal_date' | 'task' | 'cost' | 'document' | 'budget'
 type DocumentType = 'PDF' | 'DOCX' | 'XLSX' | 'LINK' | 'OTHER'
+type UserRole = 'admin' | 'user'
 
 type Matter = {
   id: string
@@ -134,6 +136,12 @@ type ActivityRow = {
   date: string
 }
 
+type CurrentUser = {
+  name: string
+  email: string
+  role: UserRole
+}
+
 type AuditEvent = {
   id: string
   actor: string
@@ -204,6 +212,13 @@ type CategoryRow = {
   id: string
   name: string
   color: string
+}
+
+type ProfileRow = {
+  id: string
+  email: string
+  full_name: string | null
+  role?: UserRole | null
 }
 
 type MatterRow = {
@@ -327,6 +342,8 @@ const navItems: NavItem[] = [
   { label: 'Reports', icon: GanttChartSquare },
   { label: 'Settings', icon: Settings },
 ]
+
+const adminFallbackEmails = new Set(['shresth@keltechgroup.com', 'upendra@keltechgroup.com'])
 
 const initialMatters: Matter[] = [
   {
@@ -630,7 +647,8 @@ function App() {
   const [dataError, setDataError] = useState('')
   const [dataLoading, setDataLoading] = useState(false)
   const [categories, setCategories] = useState<CategoryRow[]>([])
-  const [demoUser, setDemoUser] = useState({ name: 'Jane Doe', email: 'jane.doe@keltech.in' })
+  const [profile, setProfile] = useState<ProfileRow | null>(null)
+  const [demoUser, setDemoUser] = useState<CurrentUser>({ name: 'Jane Doe', email: 'jane.doe@keltech.in', role: 'admin' })
   const [activeView, setActiveView] = useState<View>('Dashboard')
   const [filter, setFilter] = useState('All')
   const [search, setSearch] = useState('')
@@ -660,11 +678,17 @@ function App() {
 
   const currentUser = useMemo(() => {
     if (session?.user.email) {
-      return { name: session.user.email.split('@')[0].replace(/[._]/g, ' '), email: session.user.email }
+      const email = session.user.email
+      return {
+        name: profile?.full_name || email.split('@')[0].replace(/[._]/g, ' '),
+        email,
+        role: profile?.role === 'admin' || adminFallbackEmails.has(email.toLowerCase()) ? 'admin' : 'user',
+      } satisfies CurrentUser
     }
     return demoUser
-  }, [demoUser, session])
+  }, [demoUser, profile, session])
   const isCloudMode = Boolean(supabase && session)
+  const isAdmin = currentUser.role === 'admin'
 
   useEffect(() => {
     if (!supabase) return
@@ -689,6 +713,7 @@ function App() {
         ])
       }
       if (event === 'SIGNED_OUT') {
+        setProfile(null)
         setAuditEvents((rows) => [
           createClientAuditEvent('Signed out user', 'unknown@keltech.in', 'LOGOUT', 'auth', 'auth-session'),
           ...rows,
@@ -702,6 +727,7 @@ function App() {
   useEffect(() => {
     if (!supabase || !session) return
     const client = supabase
+    const activeSession = session
 
     let cancelled = false
 
@@ -710,7 +736,11 @@ function App() {
       setDataError('')
       try {
         const cloudData = await loadCloudData()
+        const currentProfile = activeSession.user.email
+          ? await loadCurrentProfile(activeSession.user.id, activeSession.user.email)
+          : null
         if (cancelled) return
+        setProfile(currentProfile)
         setCategories(cloudData.categories)
         setMatters(cloudData.matters)
         setLegalDates(cloudData.legalDates)
@@ -873,7 +903,11 @@ function App() {
     event.preventDefault()
     setAuthError('')
     if (!supabase) {
-      setDemoUser({ name: authEmail.split('@')[0].replace(/[._]/g, ' '), email: authEmail })
+      setDemoUser({
+        name: authEmail.split('@')[0].replace(/[._]/g, ' '),
+        email: authEmail,
+        role: adminFallbackEmails.has(authEmail.toLowerCase()) ? 'admin' : 'user',
+      })
       appendAudit('DEMO_LOGIN', 'auth', 'demo-session', undefined, undefined, { email: authEmail })
       return
     }
@@ -887,7 +921,7 @@ function App() {
     if (supabase && session) {
       await supabase.auth.signOut()
     } else {
-      setDemoUser({ name: 'Jane Doe', email: 'jane.doe@keltech.in' })
+      setDemoUser({ name: 'Jane Doe', email: 'jane.doe@keltech.in', role: 'admin' })
     }
   }
 
@@ -990,6 +1024,35 @@ function App() {
     newDocuments.forEach((document) =>
       appendAudit('DOCUMENT_ATTACHED_ON_UPDATE', 'document', document.id, matterId, undefined, document),
     )
+  }
+
+  async function deleteMatter(matter: Matter) {
+    if (!isAdmin) {
+      setDataError('Only admins can delete matters.')
+      return
+    }
+    const confirmed = window.confirm(`Delete "${matter.title}"? This removes the matter, linked dates, documents, and matter history. Cost entries remain for reporting but become unlinked.`)
+    if (!confirmed) return
+
+    appendAudit('MATTER_DELETE_REQUESTED', 'matter', matter.id, matter.id, matter, undefined)
+    if (isCloudMode && supabase) {
+      const { error } = await supabase.from('matters').delete().eq('id', matter.id)
+      if (error) {
+        setDataError(error.message)
+        return
+      }
+    }
+
+    const remainingMatters = matters.filter((row) => row.id !== matter.id)
+    setMatters(remainingMatters)
+    setLegalDates((rows) => rows.filter((row) => row.matterId !== matter.id))
+    setTasks((rows) => rows.map((row) => (row.matterId === matter.id ? { ...row, matterId: undefined } : row)))
+    setDocuments((rows) => rows.filter((row) => row.matterId !== matter.id))
+    setMatterUpdates((rows) => rows.filter((row) => row.matterId !== matter.id))
+    setCostEntries((rows) => rows.map((row) => (row.matterId === matter.id ? { ...row, matterId: '' } : row)))
+    setSelectedMatterId(remainingMatters[0]?.id ?? '')
+    setActiveView(remainingMatters.length ? 'Matters' : 'Dashboard')
+    pushActivity(`deleted matter ${matter.title}`)
   }
 
   async function cycleMatterStatus(matter: Matter) {
@@ -1300,6 +1363,7 @@ function App() {
     matterCosts,
     matterAudit,
     selectedMatterUpdates,
+    isAdmin,
     filter,
     setFilter,
     search,
@@ -1314,6 +1378,7 @@ function App() {
     openMatter,
     cycleMatterStatus,
     setStatusModalMatterId,
+    deleteMatter,
     handleDocumentAccess,
     addDocumentsToMatter,
     addCostEntry,
@@ -1388,7 +1453,7 @@ function App() {
             <span>{initials(currentUser.name)}</span>
             <div>
               <strong>{toTitleCase(currentUser.name)}</strong>
-              <small>{supabaseConfigured ? 'Authenticated user' : 'Demo mode'}</small>
+              <small>{supabaseConfigured ? `${currentUser.role === 'admin' ? 'Admin' : 'User'} access` : 'Demo mode'}</small>
             </div>
           </div>
           <button type="button" className="ghost-button full" onClick={handleLogout}>
@@ -1581,6 +1646,7 @@ type SharedPageProps = {
   matterCosts: CostEntry[]
   matterAudit: AuditEvent[]
   selectedMatterUpdates: MatterUpdate[]
+  isAdmin: boolean
   filter: string
   setFilter: (filter: string) => void
   search: string
@@ -1595,6 +1661,7 @@ type SharedPageProps = {
   openMatter: (id: string) => void
   cycleMatterStatus: (matter: Matter) => void
   setStatusModalMatterId: (matterId: string | null) => void
+  deleteMatter: (matter: Matter) => void
   handleDocumentAccess: (document: DocumentRecord, mode: DocumentAccessMode) => void
   addDocumentsToMatter: (matterId: string, drafts: DraftDocument[]) => void
   addCostEntry: (entry: Omit<CostEntry, 'id'>) => void
@@ -1857,11 +1924,13 @@ function MatterDetailPage({
   matterCosts,
   matterAudit,
   selectedMatterUpdates,
+  isAdmin,
   legalDates,
   documents,
   setActiveView,
   setMatterModal,
   setStatusModalMatterId,
+  deleteMatter,
   handleDocumentAccess,
   addDocumentsToMatter,
 }: SharedPageProps) {
@@ -1879,6 +1948,12 @@ function MatterDetailPage({
           <p>{selectedMatter.counterparty} - {selectedMatter.category} - {selectedMatter.owner}</p>
         </div>
         <div className="button-pair">
+          {isAdmin && (
+            <button className="danger-button" type="button" onClick={() => deleteMatter(selectedMatter)}>
+              <Trash2 size={16} />
+              Delete Matter
+            </button>
+          )}
           <button className="ghost-button" type="button" onClick={() => setStatusModalMatterId(selectedMatter.id)}>
             Update Status
           </button>
@@ -4129,6 +4204,47 @@ async function loadCloudData(): Promise<CloudData> {
     matterUpdates: ((matterUpdateResult.data ?? []) as MatterUpdateRow[]).map(mapMatterUpdateRow),
     auditEvents: ((auditResult.data ?? []) as AuditEventRow[]).map((row) => mapAuditEventRow(row, matterTitleMap)),
   }
+}
+
+async function loadCurrentProfile(userId: string, email: string): Promise<ProfileRow> {
+  const client = requireSupabase()
+  const fallbackRole: UserRole = adminFallbackEmails.has(email.toLowerCase()) ? 'admin' : 'user'
+  const fallbackName = toTitleCase(email.split('@')[0].replace(/[._]/g, ' '))
+
+  const withRole = await client
+    .from('profiles')
+    .select('id,email,full_name,role')
+    .eq('id', userId)
+    .maybeSingle()
+
+  if (!withRole.error) {
+    if (withRole.data) return withRole.data as ProfileRow
+    const { data, error } = await client
+      .from('profiles')
+      .insert({ id: userId, email, full_name: fallbackName, role: fallbackRole })
+      .select('id,email,full_name,role')
+      .single()
+    if (!error && data) return data as ProfileRow
+  }
+
+  const withoutRole = await client
+    .from('profiles')
+    .select('id,email,full_name')
+    .eq('id', userId)
+    .maybeSingle()
+  if (!withoutRole.error && withoutRole.data) {
+    return { ...(withoutRole.data as Omit<ProfileRow, 'role'>), role: fallbackRole }
+  }
+
+  const { data, error } = await client
+    .from('profiles')
+    .upsert({ id: userId, email, full_name: fallbackName }, { onConflict: 'id' })
+    .select('id,email,full_name')
+    .single()
+  if (error) {
+    return { id: userId, email, full_name: fallbackName, role: fallbackRole }
+  }
+  return { ...(data as Omit<ProfileRow, 'role'>), role: fallbackRole }
 }
 
 function mapMatterRow(row: MatterRow, categoryMap: Map<string, string>): Matter {

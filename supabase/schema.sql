@@ -8,11 +8,15 @@ create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   email text not null,
   full_name text,
+  role text not null default 'user' check (role in ('admin', 'user')),
   created_by uuid references auth.users(id),
   updated_by uuid references auth.users(id),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.profiles
+add column if not exists role text not null default 'user' check (role in ('admin', 'user'));
 
 create table if not exists public.matter_categories (
   id uuid primary key default gen_random_uuid(),
@@ -179,6 +183,7 @@ create index if not exists idx_matter_updates_matter_id on public.matter_updates
 create index if not exists idx_matter_updates_created_by on public.matter_updates(created_by);
 create index if not exists idx_profiles_created_by on public.profiles(created_by);
 create index if not exists idx_profiles_updated_by on public.profiles(updated_by);
+create index if not exists idx_profiles_role on public.profiles(role);
 create index if not exists idx_audit_created_at on public.audit_events(created_at desc);
 create index if not exists idx_audit_actor on public.audit_events(actor_id, created_at desc);
 create index if not exists idx_audit_matter on public.audit_events(matter_id, created_at desc);
@@ -199,6 +204,20 @@ begin
   end if;
 
   NEW.updated_at = now();
+  return NEW;
+end;
+$$;
+
+create or replace function app_private.prevent_profile_role_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if TG_OP = 'UPDATE' and coalesce(NEW.role, 'user') <> coalesce(OLD.role, 'user') then
+    raise exception 'profile roles cannot be changed from the client';
+  end if;
   return NEW;
 end;
 $$;
@@ -409,6 +428,81 @@ begin
     );
   end loop;
 end $$;
+
+drop policy if exists authenticated_full_access on public.profiles;
+drop policy if exists authenticated_read_profiles on public.profiles;
+create policy authenticated_read_profiles
+on public.profiles
+for select
+to authenticated
+using (true);
+
+drop policy if exists authenticated_insert_own_profile on public.profiles;
+create policy authenticated_insert_own_profile
+on public.profiles
+for insert
+to authenticated
+with check (
+  id = (select auth.uid())
+  and (
+    role = 'user'
+    or (
+      role = 'admin'
+      and lower(email) in ('shresth@keltechgroup.com', 'upendra@keltechgroup.com')
+      and lower(coalesce(auth.jwt() ->> 'email', '')) = lower(email)
+    )
+  )
+);
+
+drop policy if exists authenticated_update_own_profile on public.profiles;
+create policy authenticated_update_own_profile
+on public.profiles
+for update
+to authenticated
+using (id = (select auth.uid()))
+with check (id = (select auth.uid()));
+
+drop policy if exists authenticated_full_access on public.matters;
+drop policy if exists authenticated_read_matters on public.matters;
+create policy authenticated_read_matters
+on public.matters
+for select
+to authenticated
+using (true);
+
+drop policy if exists authenticated_insert_matters on public.matters;
+create policy authenticated_insert_matters
+on public.matters
+for insert
+to authenticated
+with check ((select auth.uid()) is not null);
+
+drop policy if exists authenticated_update_matters on public.matters;
+create policy authenticated_update_matters
+on public.matters
+for update
+to authenticated
+using ((select auth.uid()) is not null)
+with check ((select auth.uid()) is not null);
+
+drop policy if exists admin_delete_matters on public.matters;
+create policy admin_delete_matters
+on public.matters
+for delete
+to authenticated
+using (
+  exists (
+    select 1
+    from public.profiles p
+    where p.id = (select auth.uid())
+      and p.role = 'admin'
+  )
+);
+
+drop trigger if exists prevent_profile_role_change on public.profiles;
+create trigger prevent_profile_role_change
+before update on public.profiles
+for each row execute function app_private.prevent_profile_role_change();
 
 drop policy if exists authenticated_full_access on public.matter_updates;
 drop policy if exists authenticated_read_matter_updates on public.matter_updates;

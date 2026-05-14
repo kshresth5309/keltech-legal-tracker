@@ -87,6 +87,7 @@
 .nav-item,
 .ghost-button,
 .primary-button,
+.danger-button,
 .tabs button,
 .auth-strip button,
 .status,
@@ -210,6 +211,7 @@
 
 .primary-button,
 .ghost-button,
+.danger-button,
 .auth-strip button {
   display: inline-flex;
   align-items: center;
@@ -232,6 +234,12 @@
   border: 1px solid #d7e0e8;
   background: #ffffff;
   color: #26384a;
+}
+
+.danger-button {
+  border: 1px solid #f2b8b8;
+  background: #fff5f5;
+  color: #b42318;
 }
 
 .ghost-button.full {
