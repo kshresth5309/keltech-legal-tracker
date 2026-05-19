@@ -1031,11 +1031,16 @@ function App() {
       setDataError('Only admins can delete matters.')
       return
     }
-    const confirmed = window.confirm(`Delete "${matter.title}"? This removes the matter, linked dates, documents, and matter history. Cost entries remain for reporting but become unlinked.`)
+    const confirmed = window.confirm(`Delete "${matter.title}"? This removes the matter, linked dates, documents, matter history, and matter-linked cost entries.`)
     if (!confirmed) return
 
     appendAudit('MATTER_DELETE_REQUESTED', 'matter', matter.id, matter.id, matter, undefined)
     if (isCloudMode && supabase) {
+      const { error: costError } = await supabase.from('cost_entries').delete().eq('matter_id', matter.id)
+      if (costError) {
+        setDataError(costError.message)
+        return
+      }
       const { error } = await supabase.from('matters').delete().eq('id', matter.id)
       if (error) {
         setDataError(error.message)
@@ -1049,7 +1054,8 @@ function App() {
     setTasks((rows) => rows.map((row) => (row.matterId === matter.id ? { ...row, matterId: undefined } : row)))
     setDocuments((rows) => rows.filter((row) => row.matterId !== matter.id))
     setMatterUpdates((rows) => rows.filter((row) => row.matterId !== matter.id))
-    setCostEntries((rows) => rows.map((row) => (row.matterId === matter.id ? { ...row, matterId: '' } : row)))
+    setCostEntries((rows) => rows.filter((row) => row.matterId !== matter.id))
+    setCosts((rows) => rebuildCostRowsFromEntries(rows, costEntries.filter((row) => row.matterId !== matter.id)))
     setSelectedMatterId(remainingMatters[0]?.id ?? '')
     setActiveView(remainingMatters.length ? 'Matters' : 'Dashboard')
     pushActivity(`deleted matter ${matter.title}`)
@@ -4250,7 +4256,8 @@ async function loadCloudData(): Promise<CloudData> {
   const matterRows = (matterResult.data ?? []) as MatterRow[]
   const matters = matterRows.map((row) => mapMatterRow(row, categoryMap))
   const matterTitleMap = new Map(matters.map((matter) => [matter.id, matter.title]))
-  const costRows = (costEntryResult.data ?? []) as CostEntryRow[]
+  const activeMatterIds = new Set(matters.map((matter) => matter.id))
+  const costRows = ((costEntryResult.data ?? []) as CostEntryRow[]).filter((row) => row.matter_id && activeMatterIds.has(row.matter_id))
   const costEntries = costRows.map((row) => mapCostEntryRow(row, categoryMap))
 
   return {
@@ -4437,7 +4444,7 @@ function buildCostRows(categories: CategoryRow[], budgets: BudgetRow[], costEntr
       actual: paidByCategory.get(name) ?? 0,
       color: categories.find((category) => category.name === name)?.color ?? categoryColor(name),
     }
-  })
+  }).filter((row) => row.budget > 0 || row.actual > 0)
 }
 
 function activityFromAudits(audits: AuditEvent[]): ActivityRow[] {

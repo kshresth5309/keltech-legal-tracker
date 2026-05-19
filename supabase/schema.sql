@@ -93,7 +93,7 @@ create table if not exists public.monthly_budgets (
 
 create table if not exists public.cost_entries (
   id uuid primary key default gen_random_uuid(),
-  matter_id uuid references public.matters(id) on delete set null,
+  matter_id uuid references public.matters(id) on delete cascade,
   category_id uuid references public.matter_categories(id),
   cost_month date not null,
   amount_inr numeric(14,2) not null check (amount_inr >= 0),
@@ -107,6 +107,26 @@ create table if not exists public.cost_entries (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.table_constraints
+    where table_schema = 'public'
+      and table_name = 'cost_entries'
+      and constraint_name = 'cost_entries_matter_id_fkey'
+  ) then
+    alter table public.cost_entries drop constraint cost_entries_matter_id_fkey;
+  end if;
+
+  alter table public.cost_entries
+  add constraint cost_entries_matter_id_fkey
+  foreign key (matter_id)
+  references public.matters(id)
+  on delete cascade;
+exception when duplicate_object then null;
+end $$;
 
 create table if not exists public.documents (
   id uuid primary key default gen_random_uuid(),
